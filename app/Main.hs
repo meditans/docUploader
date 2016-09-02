@@ -99,42 +99,7 @@ withSDist run = withTempDir $ \tdir -> do
         error $ unlines $ "The following files have \\r characters in, Windows newlines?" : bad
     withCurrentDirectory (tdir </> dropExtension (dropExtension $ takeFileName tarball)) run
 
-
-run :: Arguments -> Maybe (IO ())
-run Test{..} = Just $ do
-    test <- cabalCheck
-
-    runTest <- maybe (return True) (fmap ("test-suite" `isInfixOf`) . readFile) =<< findCabal
-
-    withSDist $ do
-        system_ "cabal install --only-dependencies"
-        system_ $ "cabal configure --enable-tests --disable-library-profiling " ++
-              "--ghc-option=-rtsopts " ++
-              "--ghc-option=-fwarn-unused-binds --ghc-option=-fwarn-unused-imports " ++
-              "--ghc-option=-fwarn-tabs " ++
-              (if no_warnings then "" else "--ghc-option=-Werror")
-        system_ "cabal build"
-        when runTest $ system_ "cabal test --show-details=always"
-        when install $ do
-            system_ "cabal copy"
-            system_ "cabal register"
-
-run Check = Just cabalCheck
-
-run Sdist = Just $ do
-    cabalCheck
-    tested <- testedWith
-    withSDist $ do
-        system_ "cabal clean"
-        system_ "cabal install --only-dependencies"
-        system_ $ "cabal configure --ghc-option=-fwarn-unused-imports --disable-library-profiling " ++
-                  "--ghc-option=-Werror --ghc-option=-fno-warn-warnings-deprecations " ++ -- CABAL BUG WORKAROUND :(
-                  "--flags=testprog"
-        system_ "cabal build"
-        system_ "cabal haddock"
-    system_ "cabal sdist"
-    putStrLn $ "Ready to release! (remember to neil tag after uploading)"
-
+run :: Docs -> Maybe (IO ())
 run Docs{..} = Just $ do
     src <- readCabal
     let ver = extractCabal "version" src
@@ -156,9 +121,6 @@ run Docs{..} = Just $ do
               "-u " ++ username ++ " " ++
               "--data-binary \"@" ++ dir ++ "/" ++ name ++ "-" ++ ver ++ "-docs.tar.gz\" " ++
               host ++ "/package/" ++ name ++ "-" ++ ver ++ "/docs"
-
-run _ = Nothing
-
 
 fixHashT :: String -> String
 fixHashT (stripPrefix ".html#t:" -> Just (x:xs)) | not $ isUpper x = ".html#v:" ++ fixHashT (x:xs)
@@ -281,19 +243,5 @@ findCabal = do
     x <- getDirectoryContents "."
     return $ listToMaybe $ filter ((==) ".cabal" . takeExtension) x
 
-data Arguments
-    -- darcs stuff
-    = Whatsnew {repo :: FilePath, local :: Bool, look_for_adds :: Bool, ssh :: Bool}
-    | Pull {repo :: FilePath}
-    | Push {repo :: FilePath, ssh :: Bool}
-    | Send {repo :: FilePath, patch :: FilePath}
-    | Apply {patch :: FilePath}
-    | Tag
-    | Docs {username :: String, host :: String}
+data Docs = Docs {username :: String, host :: String}
 
-    | Travis {wait :: Double}
-    -- cabal stuff
-    | Sdist
-    | Check
-    | Test {install :: Bool, no_warnings :: Bool}
-      deriving (Show)
