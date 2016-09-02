@@ -1,6 +1,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE RecordWildCards #-}
-module Main where
+
+module Main (main, run) where
 
 import Lib
 {-# LANGUAGE RecordWildCards, PatternGuards, ViewPatterns #-}
@@ -20,84 +21,10 @@ import Prelude
 
 defAllow = ["7.4.2","7.6.3","7.8.4","7.10.3","8.0.1"]
 
+main = undefined
 
 ---------------------------------------------------------------------
 -- COMMANDS
-
-
--- | Check the .cabal file is well formed
-cabalCheck :: IO ()
-cabalCheck = do
-    -- a lot of the warnings aren't real problems, so whitelist some
-    (_, res) <- systemOutput "cabal check"
-    let allowed = ["No errors or warnings could be found in the package."
-                  ,"These warnings may cause trouble when distributing the package:"
-                  ,"* 'ghc-options: -main-is' is not portable."
-                  ,""]
-    let bad = lines res \\ allowed
-    when (bad /= []) $ error $ unlines $ "Cabal check gave bad warnings:" : map show bad
-
-    checkCabalFile
-    checkReadme
-    checkGhci
-    -- temporarily disabled while upgrading travis infrastructure
-    when False checkTravis
-
-
-checkGhci :: IO ()
-checkGhci = do
-    let warns = words "-fwarn-unused-binds -fwarn-unused-imports"
-    src <- words <$> readFile' ".ghci"
-    unless ("-W" `elem` src || all (`elem` src) warns) $
-        error $ "The .ghci file does not enough of " ++ unwords ("-W":warns)
-
-
-checkTravis :: IO ()
-checkTravis = do
-    tests <- testedWith
-    let require =
-            ["env:"] ++
-            [" - GHCVER=" ++ t | t <- reverse tests] ++
-            [" - GHCVER=head"
-            ,"script:"
-            ," - wget https://raw.github.com/ndmitchell/neil/master/travis.sh -O - --no-check-certificate --quiet | sh"
-            ]
-    src <- readFile' ".travis.yml"
-    let got = filter (not . null) $
-              replace ["sudo: true"] [] $
-              replace ["matrix:","  allow_failures:"] [] $
-              replace ["   - env: GHCVER=8.0.1"] [] $
-              replace ["   - env: GHCVER=head"] [] $
-              map (trimEnd . takeWhile (/= '#')) $ lines src
-    when ("allow_failures:" `isInfixOf` src) $ putStrLn $ "Warning: .travis.yml allows failures with GHC HEAD"
-    got <- return $ take (length require - 1) got ++ [last got] -- drop everything between script/wget
-    when (got /= require) $
-        error $ unlines $
-            [".travis.yml file mismatch","Wanted:"] ++ require ++
-            ["Got:"] ++ got
-
-
--- | Run some commands in a temporary directory with the unpacked cabal
-withSDist :: IO a -> IO a
-withSDist run = withTempDir $ \tdir -> do
-    system_ "git diff --stat --exit-code"
-    local <- map normalise . lines <$> systemOutput_ "git ls-files . --others"
-    system_ $ "cabal configure --builddir=" ++ tdir
-    system_ $ "cabal sdist --builddir=" ++ tdir
-    files <- getDirectoryContents tdir
-    let tarball = head $ [x | x <- files, ".tar.gz" `isSuffixOf` x]
-    withCurrentDirectory tdir $ system_ $ "tar -xf " ++ tarball
-    lst <- listFilesRecursive tdir
-    let bad = local `intersect` map (normalise . drop (length tdir + length tarball - 5)) lst
-    when (bad /= []) $
-        error $ unlines $ "The following files are not checked in, but are in the dist" : bad
-    let binary = [".png",".gz",".bat",".zip",".gif",""]
-    bad <- flip filterM lst $ \file ->
-        return (takeExtension file `notElem` binary) &&^
-        fmap ('\r' `elem`) (readFileBinary' file)
-    when (bad /= []) $ do
-        error $ unlines $ "The following files have \\r characters in, Windows newlines?" : bad
-    withCurrentDirectory (tdir </> dropExtension (dropExtension $ takeFileName tarball)) run
 
 run :: Docs -> Maybe (IO ())
 run Docs{..} = Just $ do
@@ -138,90 +65,6 @@ fixFileLinks xs@(stripPrefix "<a href=\"file://" -> Just _) = error $ "Unable to
 fixFileLinks (x:xs) = x : fixFileLinks xs
 fixFileLinks [] = []
 
-
-testedWith :: IO [String]
-testedWith = do
-    src <- readCabal
-    return $ concat [ map f $ words $ map (\x -> if x == ',' then ' ' else x) $ drop 12 x
-                    | x <- lines src, "tested-with:" `isPrefixOf` x]
-    where
-        f x | Just rest <- stripPrefix "GHC==" x = rest
-            | otherwise = error $ "Invalid tested-with, " ++ x
-
-
-checkReadme :: IO ()
-checkReadme = do
-    name <- takeBaseName . fromMaybe (error "Couldn't find cabal file") <$> findCabal
-    src <- fmap lines $ readFile "README.md"
-    let qname = qualify src name
-    let badges =
-            -- DEPRECATED (style=flat is no longer required)
-            ["[![Hackage version](https://img.shields.io/hackage/v/" ++ name ++ ".svg?style=flat)]" ++
-             "(https://hackage.haskell.org/package/" ++ name ++ ") "
-            ,"[![Build Status](https://img.shields.io/travis/" ++ qname ++ ".svg?style=flat)]" ++
-             "(https://travis-ci.org/" ++ qname ++ ")"
-            -- ACTIVE
-            ,"[![Hackage version](https://img.shields.io/hackage/v/" ++ name ++ ".svg?label=Hackage)]" ++
-             "(https://hackage.haskell.org/package/" ++ name ++ ")"
-            ,"[![Stackage version](https://www.stackage.org/package/" ++ name ++ "/badge/lts?label=Stackage)]" ++
-             "(https://www.stackage.org/package/" ++ name ++ ")"
-            ,"[![Linux Build Status](https://img.shields.io/travis/" ++ qname ++ ".svg?label=Linux%20build)]" ++
-             "(https://travis-ci.org/" ++ qname ++ ")"
-            ,"[![Windows Build Status](https://img.shields.io/appveyor/ci/ndmitchell/" ++ name ++ ".svg?label=Windows%20build)]" ++
-             "(https://ci.appveyor.com/project/ndmitchell/" ++ name ++ ")"
-            ,"[![Build Status](https://img.shields.io/travis/" ++ qname ++ ".svg)]" ++
-             "(https://travis-ci.org/" ++ qname ++ ")"
-            ]
-    let line1 = head $ src ++ [""]
-    let bangs = length $ filter (== '!') line1
-    let found = length $ filter (`isInfixOf` line1) badges
-    when (found < 2) $
-        error $ "Expected first line of README.md to end with at least 2 badges, got " ++ show found
-    when (found /= bangs) $
-        error $ "Unexpected badges, found " ++ show bangs ++ ", but only recognised " ++ show found
-
-
-checkCabalFile :: IO ()
-checkCabalFile = do
-    project <- takeBaseName . fromMaybe (error "Couldn't find cabal file") <$> findCabal 
-    src <- fmap lines readCabal
-    test <- testedWith
-    let grab tag = [trimStart $ drop (length tag + 1) x | x <- relines src, (tag ++ ":") `isPrefixOf` x]
-    license <- readFile' $ concat $ grab "license-file"
-    year <- show . fst3 . toGregorian . utctDay <$> getCurrentTime
-    let bad =
-            ["Incorrect declaration style: " ++ x
-                | (x,':':_) <- map (break (== ':') . trimStart) src
-                , not $ any isSpace $ trim x, not $ "http" `isSuffixOf` x || "https" `isSuffixOf` x
-                , not $ all (\x -> isLower x || x == '-') x] ++
-            [year ++ " is not in the copyright year" | not $ year `isInfixOf` concat (grab "copyright")] ++
-            ["copyright string is not at the start of the license" | not $ (concat (grab "copyright") `isInfixOf` concat (take 1 $ lines license)) || grab "license" == ["GPL"]] ++
-            ["No correct source-repository link"
-                | let want = "source-repository head type: git location: https://github.com/" ++ qualify src project ++ ".git"
-                , not $ want `isInfixOf` unwords (words $ unlines src)] ++
-            ["No bug-reports link" | grab "bug-reports" /= ["https://github.com/" ++ qualify src project ++ "/issues"]] ++
-            ["Homepage no longer exists" | "~ndm" `isInfixOf` concat (grab "homepage")] ++
-            ["Incorrect license " | grab "license" `notElem` [["BSD3"],["MIT"],["GPL"]]] ++
-            ["Invalid tested-with: " ++ show test | not $ validTests test] ++
-            ["Bad stabilty, should be missing" | grab "stability" /= []] ++
-            ["Missing CHANGES.txt in extra-doc-files" | ["CHANGES.txt","changelog.md"] `disjoint` concatMap words (grab "extra-doc-files")] ++
-            ["Missing README.md in extra-doc-files" | "README.md" `notElem` concatMap words (grab "extra-doc-files")]
-    unless (null bad) $ error $ unlines bad
-
-validTests :: [String] -> Bool
-validTests xs = length xs > 1 && xs `isPrefixOf` reverse defAllow
-
-qualify :: [String] -> String -> String
-qualify src proj = user ++ "/" ++ proj
-    where user1 = takeWhile (/= '/') $ drop 19 $ snd $ breakOn "https://github.com/" $ unlines src
-          user2 = takeWhile (/= '/') $ drop 30 $ snd $ breakOn "https://img.shields.io/travis/" $ unlines src
-          user = if user2 /= "" then user2 else if user1 /= "" then user1 else "ndmitchell"
-
-relines :: [String] -> [String]
-relines (x:xs) | ":" `isSuffixOf` x = unwords (x:a) : relines b
-    where (a,b) = break (\x -> trimStart x == x) xs
-relines (x:xs) = x : relines xs
-relines [] = []
 
 readCabal :: IO String
 readCabal = do
